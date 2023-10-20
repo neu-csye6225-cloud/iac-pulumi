@@ -1,77 +1,185 @@
 const pulumi = require("@pulumi/pulumi");
 const aws = require("@pulumi/aws");
 
-const vpcCidrBlock = "10.0.0.0/16";
 
-const vpc = new aws.ec2.Vpc("my-vpc", {
-    cidrBlock: vpcCidrBlock,
-});
+const config = new pulumi.Config();
 
-const igw = new aws.ec2.InternetGateway("my-igw", {
+const azCount = config.getNumber("azCount");
+const vpcCidr = config.require("vpcCidr");
+const cidr = config.require("cidr");
+const publicSubnets = [];
+const privateSubnets = [];
+
+const subnetSuffix = config.require("subnetSuffix");
+const state = config.require("state");
+const vpcName = config.require("vpcName");
+const igwName = config.require("igwName");
+const publicSta = config.require("public");
+const destCidr = config.require("destCidr");
+const pubRouteAssoc = config.require("pubRouteAssoc");
+const privRouteAssoc = config.require("privRouteAssoc");
+const privateSta = config.require("private");
+const pubSubnet = config.require("pubSubnet");
+const privSubnet = config.require("privSubnet");
+const pubRt = config.require("pubRt");
+const privRt = config.require("privRt");
+const pubRoute = config.require("pubRoute");
+const owner = config.require("owner");
+
+function getFirstNAz(data, n) {
+  const azCount = data.names.length;
+
+  if (azCount >= n) {
+    return data.names.slice(0, n);
+  } else {
+    return data.names;
+  }
+}
+
+const azNames = [];
+
+aws.getAvailabilityZones({ state: state }).then((data) => {
+  const azs = getFirstNAz(data, azCount);
+  const vpc = new aws.ec2.Vpc(vpcName, {
+    cidrBlock: vpcCidr,
+    availabilityZones: azs,
+  });
+  const igw = new aws.ec2.InternetGateway(igwName, {
     vpcId: vpc.id,
-});
+  });
 
-const publicRouteTable = new aws.ec2.RouteTable("public-route-table", {
-    vpcId: vpc.id,
-});
+  for (let i = 0; i < azs.length; i++) {
+    const az = azs[i];
+    azNames.push(az);
+  }
 
-const privateRouteTable = new aws.ec2.RouteTable("private-route-table", {
-    vpcId: vpc.id,
-});
+  const calcCidr = (index, subnetType) => {
+    const subnetNum = subnetType === publicSta ? index : index + azCount;
+    return `${cidr}.${subnetNum}${subnetSuffix}`;
+  };
 
-const azs = aws.getAvailabilityZones();
+  for (let i = 0; i < azNames.length; i++) {
+    const az = azNames[i];
 
-const calculateCidrBlock = (baseCidrBlock, index, subnetType) => {
-    const subnetNumber = subnetType === "public" ? index * 2 : index * 2 + 1;
-    const subnetMask = 24; // Use /24 subnet mask for your subnets
-    const baseParts = baseCidrBlock.split('/');
-    const baseIpAddress = baseParts[0];
-    return `${baseIpAddress}.${subnetNumber}.0/${subnetMask}`;
-};
-
-azs.then(az => {
-    const maxSubnets = 6;
-    let subnetCount = 0;
-
-    az.names.forEach((zoneName, azIndex) => {
-        if (subnetCount >= maxSubnets) return;
-
-        let subnetsToCreate;
-
-        if (az.names.length <= 2) {
-            subnetsToCreate = azIndex === 0 ? 4 : 2;
-        } else {
-            subnetsToCreate = 2;
-        }
-
-        for (let i = 0; i < subnetsToCreate; i++) {
-            if (subnetCount >= maxSubnets) break;
-
-            const subnetType = i % 2 === 0 ? "public" : "private";
-            const routeTable = subnetType === "public" ? publicRouteTable : privateRouteTable;
-            const subnetName = `${subnetType}-subnet-${subnetCount}`;
-
-            const subnet = new aws.ec2.Subnet(subnetName, {
-                vpcId: vpc.id,
-                availabilityZone: zoneName,
-                cidrBlock: calculateCidrBlock(vpcCidrBlock, subnetCount, subnetType),
-                mapPublicIpOnLaunch: subnetType === "public",
-            });
-
-            new aws.ec2.RouteTableAssociation(`${subnetType}-rta-${subnetCount}`, {
-                subnetId: subnet.id,
-                routeTableId: routeTable.id,
-            });
-
-            subnetCount++;
-        }
+    const pubSub = new aws.ec2.Subnet(`${pubSubnet}-${az}-${i}`, {
+      vpcId: vpc.id,
+      cidrBlock: calcCidr(i, publicSta),
+      availabilityZone: az,
+      mapPublicIpOnLaunch: true,
+      tags: {
+        Name: pubSubnet,
+      },
     });
-});
 
-const publicRoute = new aws.ec2.Route("public-route", {
-    routeTableId: publicRouteTable.id,
-    destinationCidrBlock: "0.0.0.0/0",
+    const privSub = new aws.ec2.Subnet(`${privSubnet}-${az}-${i}`, {
+      vpcId: vpc.id,
+      cidrBlock: calcCidr(i, privateSta),
+      availabilityZone: az,
+      tags: {
+        Name: privSubnet,
+      },
+    });
+
+    publicSubnets.push(pubSub);
+    privateSubnets.push(privSub);
+  }
+
+  const pubRtTable = new aws.ec2.RouteTable(pubRt, {
+    vpcId: vpc.id,
+    tags: {
+      Name: pubRt,
+    },
+  });
+
+  const privRtTable = new aws.ec2.RouteTable(privRt, {
+    vpcId: vpc.id,
+    tags: {
+      Name: privRt,
+    },
+  });
+
+  const pubRtEntry = new aws.ec2.Route(pubRoute, {
+    routeTableId: pubRtTable.id,
+    destinationCidrBlock: destCidr,
     gatewayId: igw.id,
+  });
+
+  publicSubnets.forEach((subnet, i) => {
+    new aws.ec2.RouteTableAssociation(
+      `${pubRouteAssoc}-${subnet.availabilityZone}-${i}`,
+      {
+        subnetId: subnet.id,
+        routeTableId: pubRtTable.id,
+        tags: {
+          Name: pubRouteAssoc,
+        },
+      }
+    );
+  });
+
+  privateSubnets.forEach((subnet, i) => {
+    new aws.ec2.RouteTableAssociation(
+      `${privRouteAssoc}-${subnet.availabilityZone}-${i}`,
+      {
+        subnetId: subnet.id,
+        routeTableId: privRtTable.id,
+        tags: {
+          Name: privRouteAssoc,
+        },
+      }
+    );
+  });
+
+  const vpcId = vpc.id;
+  const instanceName = "MyEC2Instance";
+  const securityGroup = new aws.ec2.SecurityGroup("app-sec-group", {
+    vpcId: vpcId,
+    ingress: [
+      {
+        protocol: "tcp",
+        fromPort: 22,
+        toPort: 22,
+        cidrBlocks: ["0.0.0.0/0"],
+      },
+      {
+        protocol: "tcp",
+        fromPort: 80,
+        toPort: 80,
+        cidrBlocks: ["0.0.0.0/0"],
+      },
+      {
+        protocol: "tcp",
+        fromPort: 443,
+        toPort: 443,
+        cidrBlocks: ["0.0.0.0/0"],
+      },
+      {
+        protocol: "tcp",
+        fromPort: 3001,
+        toPort: 3001,
+        cidrBlocks: ["0.0.0.0/0"],
+      },
+    ],
+  });
+
+  const ec2Inst = new aws.ec2.Instance(instanceName, {
+    ami:aws.ec2.getAmi({
+      owners: [owner],
+      mostRecent: true,
+      filters: [{ name: "state", values: ["available"] }],
+    }).then((ami) => ami.id),
+    instanceType: "t2.micro",
+    vpcSecurityGroupIds: [securityGroup.id],
+    associatePublicIpAddress: true,
+    subnetId: publicSubnets[0].id,
+    keyName: "ec2-key",
+    tags: { Name: instanceName },
+    rootBlockDevice: {
+      volumeSize: 25,
+      volumeType: "gp2",
+      deleteOnTermination: true,
+    },
+  });
 });
 
-exports.vpcId = vpc.id;
+ 

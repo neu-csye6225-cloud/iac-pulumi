@@ -1,6 +1,6 @@
 config:
     aws:region: us-east-1
-    aws:profile: dev
+    aws:profile: demo
     azCount: 3
     vpcCidr: "10.0.0.0/16"
     cidr: "10.0"
