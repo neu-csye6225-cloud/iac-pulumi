@@ -1,7 +1,6 @@
 const pulumi = require("@pulumi/pulumi");
 const aws = require("@pulumi/aws");
 
-
 const config = new pulumi.Config();
 
 const azCount = config.getNumber("azCount");
@@ -162,12 +161,124 @@ aws.getAvailabilityZones({ state: state }).then((data) => {
     ],
   });
 
+    const rdsParameterGroup = new aws.rds.ParameterGroup("customrdsparamgroup", {
+      family: "mysql8.0", // Replace with the appropriate RDS engine and version
+      parameters: [
+          {
+              name: "max_connections",
+              value: "100",
+          },
+          // Add more parameters as needed
+      ],
+  });
+
+  
+
+    const dbsubnetgroup = new aws.rds.SubnetGroup("rdssubnetgroup", {
+        subnetIds: privateSubnets.map(subnet => subnet.id),
+        description:"My rds subnet group for private subnets",
+    });
+    
+    const webAppSecurityGroup = new aws.ec2.SecurityGroup("webapp-sg", {
+      vpcId: vpc.id,
+      ingress: [
+        {
+          fromPort: 22,
+          toPort: 22,
+          protocol: "tcp",
+          cidrBlocks: ["0.0.0.0/0"], // Allow SSH from anywhere
+        },
+        {
+          fromPort: 80,
+          toPort: 80,
+          protocol: "tcp",
+          cidrBlocks: ["0.0.0.0/0"], // Allow HTTP from anywhere
+        },
+        {
+          fromPort: 443,
+          toPort: 443,
+          protocol: "tcp",
+          cidrBlocks: ["0.0.0.0/0"], // Allow HTTPS from anywhere
+        },
+        {
+          fromPort: 8080,
+          toPort: 8080,
+          protocol: "tcp",
+          cidrBlocks: ["0.0.0.0/0"], // Allow your application traffic from anywhere
+        },
+      ],
+      egress: [
+        {
+          fromPort: 3306,      // Allow outbound traffic on port 3306
+          toPort: 3306,        // Allow outbound traffic on port 3306
+          protocol: "tcp",     // TCP protocol
+          cidrBlocks: ["0.0.0.0/0"],  // Allow all destinations
+        },
+     
+      ],
+    });
+   
+    const dbSecurityGroup = new aws.ec2.SecurityGroup("db-sg", {
+      vpcId: vpc.id,
+      ingress: [
+          {
+              fromPort: 3306, // For MariaDB
+              toPort: 3306, // For MariaDB
+              protocol: "tcp",
+              securityGroups: [webAppSecurityGroup.id], // Referencing the application security group as source
+          },
+      ],
+      egress: [
+          {
+              fromPort: 0,
+              toPort: 0,
+              protocol: "-1",
+              cidrBlocks: ["0.0.0.0/0"],
+          },
+      ],
+    });
+    const rdsInstance = new aws.rds.Instance('my-rds-instance', {
+      allocatedStorage: 20,
+      storageType: 'gp2',
+      engine: 'mysql', // Replace with 'postgres' or 'mariadb' as needed
+      instanceClass: 'db.t2.micro', // Use the cheapest available class
+      name: 'csye6225',
+      username:'csye6225',
+      password: 'sheetalcsye', // Replace with a strong password
+      skipFinalSnapshot: true, // Prevent the creation of a final snapshot when deleting the RDS instance
+      multiAz: false, // No Multi-AZ deployment
+      dbSubnetGroupName: dbsubnetgroup, // Replace with the name of your private subnet group
+      publiclyAccessible: false, // No public accessibility
+      vpcSecurityGroupIds: [dbSecurityGroup.id], // Replace with the ID of your Database security group
+      parameterGroupName:rdsParameterGroup,
+  
+
+  });
   const ec2Inst = new aws.ec2.Instance(instanceName, {
     ami:aws.ec2.getAmi({
       owners: [owner],
       mostRecent: true,
       filters: [{ name: "state", values: ["available"] }],
     }).then((ami) => ami.id),
+    dependsOn:rdsInstance,
+    userData:pulumi.interpolate `
+    #!/bin/bash
+    cd /home/admin
+    chmod +w .env
+    host="${rdsInstance.address}"
+    user="${rdsInstance.username}",
+    dbname="${rdsInstance.dbName}"
+    password="${rdsInstance.password}"
+    port="${rdsInstance.port}"
+    db_dialect="${rdsInstance.engine}"
+    
+    # Edit the key-value pairs
+    echo "HOST=$host" > .env
+    echo "DATABASE_USER=$user" >> .env
+    echo "DATABASE_NAME=$dbname" >> .env
+    echo "DATABASE_PASSWORD=$password" >> .env
+    echo "DATABASE_PORT=$port" >> .env
+    `,
     instanceType: "t2.micro",
     vpcSecurityGroupIds: [securityGroup.id],
     associatePublicIpAddress: true,
@@ -181,5 +292,3 @@ aws.getAvailabilityZones({ state: state }).then((data) => {
     },
   });
 });
-
- 

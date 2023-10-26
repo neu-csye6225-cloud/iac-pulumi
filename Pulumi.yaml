@@ -1,4 +1,4 @@
-name: iacpulumi
+name: iac-pulumi
 runtime:
   name: nodejs
   options:
