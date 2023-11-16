@@ -131,6 +131,31 @@ aws.getAvailabilityZones({ state: state }).then((data) => {
 
   const vpcId = vpc.id;
   const instanceName = "MyEC2Instance";
+  const loadBalancerSecurityGroup = new aws.ec2.SecurityGroup("loadBalancerSecurityGroup", {
+    vpcId:vpc.id,
+    ingress: [
+        {
+            protocol: "tcp",
+            fromPort: 80,
+            toPort: 80,
+            cidrBlocks: ["0.0.0.0/0"], // Allow traffic from anywhere on port 80
+        },
+        {
+            protocol: "tcp",
+            fromPort: 443,
+            toPort: 443,
+            cidrBlocks: ["0.0.0.0/0"], // Allow traffic from anywhere on port 443
+        },
+    ],
+    egress:[
+      {
+        protocol:"-1",
+        fromPort:0,
+        toPort:0,
+        cidrBlocks:["0.0.0.0/0"],
+      }
+    ]
+  });
   const securityGroup = new aws.ec2.SecurityGroup("app-sec-group", {
     vpcId: vpcId,
     ingress: [
@@ -138,37 +163,27 @@ aws.getAvailabilityZones({ state: state }).then((data) => {
         protocol: "tcp",
         fromPort: 22,
         toPort: 22,
-        cidrBlocks: ["0.0.0.0/0"],
-      },
-      {
-        protocol: "tcp",
-        fromPort: 80,
-        toPort: 80,
-        cidrBlocks: ["0.0.0.0/0"],
-      },
-      {
-        protocol: "tcp",
-        fromPort: 443,
-        toPort: 443,
-        cidrBlocks: ["0.0.0.0/0"],
+        securityGroups:[loadBalancerSecurityGroup.id],
       },
       {
         protocol: "tcp",
         fromPort: 3001,
         toPort: 3001,
-        cidrBlocks: ["0.0.0.0/0"],
-      },
+        securityGroups:[loadBalancerSecurityGroup.id], // Allow traffic from the load balancer security group
+    },
     ],
     egress: [
       {
-        fromPort: 3306,      // Allow outbound traffic on port 3306
-        toPort: 3306,        // Allow outbound traffic on port 3306
-        protocol: "tcp",     // TCP protocol
-        cidrBlocks: ["0.0.0.0/0"],  // Allow all destinations
-      },
+        fromPort: 0,      // Allow outbound traffic on port 3306
+        toPort: 0,        // Allow outbound traffic on port 3306
+        protocol: -1,     // TCP protocol
+        cidrBlocks:["0.0.0.0/0"],  // Allow all destinations
+      }
     ],
-    
-  })
+  },{
+    dependsOn:[loadBalancerSecurityGroup],
+  });
+
   const rdsParameterGroup = new aws.rds.ParameterGroup("customrdsparamgroup", {
     family: "mysql8.0", // Replace with the appropriate RDS engine and version
     parameters: [
@@ -203,7 +218,10 @@ aws.getAvailabilityZones({ state: state }).then((data) => {
               cidrBlocks: ["0.0.0.0/0"],
           },
       ],
+    },{
+      dependsOn:[securityGroup],
     });
+
     const rdsInstance = new aws.rds.Instance('my-rds-instance', {
       allocatedStorage: 20,
       storageType: 'gp2',
@@ -241,81 +259,246 @@ const rolePolicyAttachment = new aws.iam.RolePolicyAttachment("cloudwatchAgentPo
 const instanceProfile = new aws.iam.InstanceProfile(
   "instanceProfileName", {
   role: cloudWatchAgentRole.name,
-  dependsOn: [rolePolicyAttachment] 
- 
+  dependsOn: [rolePolicyAttachment],
 });
-  const ec2Inst = new aws.ec2.Instance(instanceName, {
-    ami:aws.ec2.getAmi({
-      owners: [owner],
-      mostRecent: true,
-      filters: [{ name: "state", values: ["available"] }],
-    }).then((ami) => ami.id),
-    dependsOn:rdsInstance,
-    iamInstanceProfile: instanceProfile.name,
-    userData:pulumi.interpolate `
-    #!/bin/bash
-    cd /home/admin/WebApp
-    chmod +w .env
-    editable_file=".env"  
-    mysql_database=${rdsInstance.dbName}
-    mysql_user=${rdsInstance.username}
-    mysql_password=${rdsInstance.password}
-    mysql_port=${rdsInstance.port}
-    mysql_host=${rdsInstance.address}
-    db_dialect=${rdsInstance.engine}
-       
-    if [ -f "$editable_file" ]; then
-           
-    > "$editable_file"
-       
-        # Add new key-value pairs
-        echo "MYSQL_DATABASE=$mysql_database" >> "$editable_file"
-        echo "MYSQL_USER=$mysql_user" >> "$editable_file"
-        echo "MYSQL_PASSWORD=$mysql_password" >> "$editable_file"
-        echo "MYSQL_PORT=$mysql_port" >> "$editable_file"
-        echo "MYSQL_HOST=$mysql_host" >> "$editable_file"
-        echo "DB_DIALECT=$db_dialect" >> "$editable_file"
-       
-        echo "Cleared old data in $editable_file and added new key-value pairs."
-    else
-        echo "File $editable_file does not exist."
-    fi
-    sudo chown csye6225:csye6225 /home/admin/WebApp
- 
-    sudo chmod 750 /home/admin/WebApp
+const loadBalancer = new aws.lb.LoadBalancer("webAppLoadBalancer", {
+  internal:false,
+  loadBalancerType:"application",
+  securityGroups: [loadBalancerSecurityGroup.id],
+  subnets: publicSubnets,
+});
 
-    sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
-    -a fetch-config \
-    -m ec2 \
-    -c file:/opt/cloudwatch-config.json \
-    -s
+const userdat = pulumi.interpolate`
+                  #!/bin/bash
+                  cd /home/admin/WebApp
+                  chmod +w .env
+                  editable_file=".env"  
+                  mysql_database=${rdsInstance.dbName}
+                  mysql_user=${rdsInstance.username}
+                  mysql_password=${rdsInstance.password}
+                  mysql_port=${rdsInstance.port}
+                  mysql_host=${rdsInstance.address}
+                  db_dialect=${rdsInstance.engine}
+                    
+                  if [ -f "$editable_file" ]; then
+                        
+                  > "$editable_file"
+                    
+                      # Add new key-value pairs
+                      echo "MYSQL_DATABASE=$mysql_database" >> "$editable_file"
+                      echo "MYSQL_USER=$mysql_user" >> "$editable_file"
+                      echo "MYSQL_PASSWORD=$mysql_password" >> "$editable_file"
+                      echo "MYSQL_PORT=$mysql_port" >> "$editable_file"
+                      echo "MYSQL_HOST=$mysql_host" >> "$editable_file"
+                      echo "DB_DIALECT=$db_dialect" >> "$editable_file"
+                    
+                      echo "Cleared old data in $editable_file and added new key-value pairs."
+                  else
+                      echo "File $editable_file does not exist."
+                  fi
+                  sudo chown csye6225:csye6225 /home/admin/WebApp
 
-    `.apply((s)=>s.trim()),
-    instanceType: "t2.micro",
-    vpcSecurityGroupIds: [securityGroup.id],
-    associatePublicIpAddress: true,
-    subnetId: publicSubnets[0].id,
-    keyName: "ec2dev",
-    tags: { Name: instanceName },
-    rootBlockDevice: {
-      volumeSize: 25,
-      volumeType: "gp2",
-      deleteOnTermination: true,
+                  sudo chmod 750 /home/admin/WebApp
+
+                  sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+                  -a fetch-config \
+                  -m ec2 \
+                  -c file:/opt/aws/amazon-cloudwatch-agent/bin/cloud-watch-agent.json \
+                  -s`
+//const Base64userdata = userdat.apply(script=>Buffer.from(script).toString("base64"))
+
+const launchTemplate = new aws.ec2.LaunchTemplate("webAppLaunchTemplate", {
+  imageId:"ami-03a3253e23c6da75c",
+  // aws.ec2.getAmi({
+  //   owners: [owner],
+  //   mostRecent: true,
+  //  filters: [{ name: "state", values: ["available"] }],
+  //  }).then((ami) => ami.id),
+  instanceType: "t2.micro",
+  dependsOn:rdsInstance,
+  keyName: "ec2dev",
+  userData: userdat.apply(script=>Buffer.from(script).toString("base64")),
+  iamInstanceProfile: {
+      name: instanceProfile,
+  },
+  associatePublicIpAddress : true,
+  networkInterfaces : [
+    {
+      securityGroups : [securityGroup.id],
     },
+  ],
+},{dependsOn:[instanceProfile,rdsInstance]});
+
+const targetGroup = new aws.lb.TargetGroup("webAppTargetGroup", {
+  port: 3001,
+  protocol: "HTTP",
+  targetType:"instance",
+  vpcId: vpc.id,
+  associatePublicIpAddress:true,
+  healthCheck: {
+      path: "/healthz", // Adjust the health check path based on your application
+      port: 3001,
+      protocol:"HTTP",
+      timeout:10,
+      unhealthyThreshold:2,
+      healthyThreshold:2,
+  },
+});
+const listener = new aws.lb.Listener("webAppListener", {
+  loadBalancerArn: loadBalancer.arn,
+  port: 80,
+  defaultActions: [
+      {
+          type: "forward",
+          targetGroupArn: targetGroup.arn,
+      },
+  ],
+},{dependsOn: loadBalancer});
+// Create an autoscaling group with tags
+const autoScalingGroup = new aws.autoscaling.Group("webAppAutoScalingGroup", {
+  vpc:vpc.id,
+  vpcZoneIdentifiers: publicSubnets,
+  launchTemplate:{
+    id:launchTemplate.id,
+    version:"$Latest",
+  },
+  minSize: 1,
+  maxSize: 3,
+  desiredCapacity: 1,
+  cooldown: 60,
+  tags: [
+      {
+          key: "AutoScalingGroup",
+          value: "WebAppASG",
+          propagateAtLaunch: true,
+      },
+  ],
+  targetGroupArns:[targetGroup.arn]
+},{dependsOn:[listener]});
+
+const scaleUpPolicy = new aws.autoscaling.Policy("scaleUpPolicy", {
+  scalingAdjustment: 1,
+  adjustmentType: "ChangeInCapacity",
+  cooldown: 60,
+  autoscalingGroupName: autoScalingGroup.name,
+  name: "scaleUpPolicy",
+  evaluationPeriods: 1,
+  metricAggregationType: "Average",
+  scalingTargetId:autoScalingGroup.id,
+});
+
+const scaleDownPolicy = new aws.autoscaling.Policy("scaleDownPolicy", {
+  scalingAdjustment: -1,
+  adjustmentType: "ChangeInCapacity",
+  cooldown: 60,
+  autoscalingGroupName: autoScalingGroup.name,
+  name: "scaleDownPolicy",
+  metricAggregationType: "Average",
+  scalingTargetId:autoScalingGroup.id,
+});
+
+// Create a listener for HTTP traffic
+
+    const domain = "dev.sheetalpujari.me"
+    const hostedZone = aws.route53.getZone({
+      name:domain,
+    });
+    hostedZone.then(zone => {
+    const port = 3001;
+
+    const aRecord = new aws.route53.Record('csye-6225', {
+    name: domain,
+    zoneId: zone.id,
+    type: 'A',
+    aliases: [
+      {
+        name: loadBalancer.dnsName,
+        zoneId: loadBalancer.zoneId,
+        evaluateTargetHealth: true,
+      },
+    ]
   });
+
+
+},
+{dependsOn:[loadBalancer]});
+});
+
+
+              // const ec2Inst = new aws.ec2.Instance(instanceName, {
+              //   ami:"ami-0861b8c1d1f16965a",
+              //   // aws.ec2.getAmi({
+              //   //   owners: [owner],
+              //   //   mostRecent: true,
+              //   //   filters: [{ name: "state", values: ["available"] }],
+              //   // }).then((ami) => ami.id),
+              //   dependsOn:rdsInstance,
+              //   iamInstanceProfile: instanceProfile.name,
+              //   userData:pulumi.interpolate `
+              //   #!/bin/bash
+              //   cd /home/admin/WebApp
+              //   chmod +w .env
+              //   editable_file=".env"  
+              //   mysql_database=${rdsInstance.dbName}
+              //   mysql_user=${rdsInstance.username}
+              //   mysql_password=${rdsInstance.password}
+              //   mysql_port=${rdsInstance.port}
+              //   mysql_host=${rdsInstance.address}
+              //   db_dialect=${rdsInstance.engine}
+                  
+              //   if [ -f "$editable_file" ]; then
+                      
+              //   > "$editable_file"
+                  
+              //       # Add new key-value pairs
+              //       echo "MYSQL_DATABASE=$mysql_database" >> "$editable_file"
+              //       echo "MYSQL_USER=$mysql_user" >> "$editable_file"
+              //       echo "MYSQL_PASSWORD=$mysql_password" >> "$editable_file"
+              //       echo "MYSQL_PORT=$mysql_port" >> "$editable_file"
+              //       echo "MYSQL_HOST=$mysql_host" >> "$editable_file"
+              //       echo "DB_DIALECT=$db_dialect" >> "$editable_file"
+                  
+              //       echo "Cleared old data in $editable_file and added new key-value pairs."
+              //   else
+              //       echo "File $editable_file does not exist."
+              //   fi
+              //   sudo chown csye6225:csye6225 /home/admin/WebApp
+            
+              //   sudo chmod 750 /home/admin/WebApp
+
+              //   sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+              //   -a fetch-config \
+              //   -m ec2 \
+              //   -c file:/opt/aws/amazon-cloudwatch-agent/bin/cloudwatch-config.json \
+              //   -s
+
+              //   `.apply((s)=>s.trim()),
+              //   instanceType: "t2.micro",
+              //   vpcSecurityGroupIds: [securityGroup.id],
+              //   associatePublicIpAddress: true,
+              //   subnetId: publicSubnets[0].id,
+              //   keyName: "ec2dev",
+              //   tags: { Name: instanceName },
+              //   rootBlockDevice: {
+              //     volumeSize: 25,
+              //     volumeType: "gp2",
+              //     deleteOnTermination: true,
+              //   },
+              // });
   //for A record creation
-    //const baseDomainName = config.require("basedomain"); 
-    const baseDomainName = "dev.sheetalpujari.me";
-    const zonePromise = aws.route53.getZone({ name: baseDomainName }, { async: true });
+  //const baseDomainName = config.require("basedomain"); 
+//     const zonePromise = aws.route53.getZone({ name: baseDomainName }, { async: true });
 
-    zonePromise.then(zone => {
+//     zonePromise.then(zone => {
 
-    const record = new aws.route53.Record("myRecord", {
-    zoneId: zone.zoneId, 
-    name: "",
-    type: "A",
-    ttl: 60,
-    records: [ec2Inst.publicIp],
-}, { dependsOn: [ec2Inst]});
-});
-});
+//     const record = new aws.route53.Record("myRecord", {
+//         zoneId: zone.zoneId, 
+//         name: "",
+//         type: "A",
+//         ttl: 60,
+//         records: [ec2Inst.publicIp], 
+//     },
+//     { dependsOn: [ec2Inst]});
+
+    
+// });
