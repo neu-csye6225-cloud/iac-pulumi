@@ -1,14 +1,11 @@
 const pulumi = require("@pulumi/pulumi");
 const aws = require("@pulumi/aws");
-
 const config = new pulumi.Config();
-
 const azCount = config.getNumber("azCount");
 const vpcCidr = config.require("vpcCidr");
 const cidr = config.require("cidr");
 const publicSubnets = [];
 const privateSubnets = [];
-
 const subnetSuffix = config.require("subnetSuffix");
 const state = config.require("state");
 const vpcName = config.require("vpcName");
@@ -34,9 +31,7 @@ function getFirstNAz(data, n) {
     return data.names;
   }
 }
-
 const azNames = [];
-
 aws.getAvailabilityZones({ state: state }).then((data) => {
   const azs = getFirstNAz(data, azCount);
   const vpc = new aws.ec2.Vpc(vpcName, {
@@ -130,7 +125,7 @@ aws.getAvailabilityZones({ state: state }).then((data) => {
   });
 
   const vpcId = vpc.id;
-  const instanceName = "MyEC2Instance";
+  
   const loadBalancerSecurityGroup = new aws.ec2.SecurityGroup("loadBalancerSecurityGroup", {
     vpcId:vpc.id,
     ingress: [
@@ -191,10 +186,7 @@ aws.getAvailabilityZones({ state: state }).then((data) => {
             name: "max_connections",
             value: "100",
         },
-        // Add more parameters as needed
     ],
-    
-    
     });
    const dbsubnetgroup = new aws.rds.SubnetGroup("rdssubnetgroup", {
       subnetIds: privateSubnets.map(subnet => subnet.id),
@@ -223,6 +215,7 @@ aws.getAvailabilityZones({ state: state }).then((data) => {
     });
 
     const rdsInstance = new aws.rds.Instance('my-rds-instance', {
+      vpcId: vpc.id,
       allocatedStorage: 20,
       storageType: 'gp2',
       engine: "mysql", // Replace with 'postgres' or 'mariadb' as needed
@@ -232,11 +225,11 @@ aws.getAvailabilityZones({ state: state }).then((data) => {
       password: 'sheetalcsye', // Replace with a strong password
       skipFinalSnapshot: true, // Prevent the creation of a final snapshot when deleting the RDS instance
       multiAz: false, // No Multi-AZ deployment
-      dbSubnetGroupName: dbsubnetgroup, // Replace with the name of your private subnet group
+      dbSubnetGroupName: dbsubnetgroup.name, // Replace with the name of your private subnet group
       publiclyAccessible: false, // No public accessibility
       vpcSecurityGroupIds: [dbSecurityGroup.id], // Replace with the ID of your Database security group
-      parameterGroupName:rdsParameterGroup,
-  });
+      parameterGroupName:rdsParameterGroup.name,
+  },{dependsOn:[dbsubnetgroup,dbSecurityGroup,rdsParameterGroup]});
   
 
   const cloudWatchAgentRole = new aws.iam.Role("AgentRole", {
@@ -255,78 +248,72 @@ const rolePolicyAttachment = new aws.iam.RolePolicyAttachment("cloudwatchAgentPo
   policyArn: "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy",
   role: cloudWatchAgentRole.name,
 
-});
+},{ dependsOn: [cloudWatchAgentRole] });
+
+const userdat = pulumi.interpolate
+`#!/bin/bash
+cd /home/admin/WebApp
+chmod +w .env
+editable_file=".env"  
+mysql_database=${rdsInstance.dbName}
+mysql_user=${rdsInstance.username}
+mysql_password=${rdsInstance.password}
+mysql_port=${rdsInstance.port}
+mysql_host=${rdsInstance.address}
+db_dialect=${rdsInstance.engine}
+  
+if [ -f "$editable_file" ]; then
+      
+> "$editable_file"
+  
+    # Add new key-value pairs
+    echo "MYSQL_DATABASE=$mysql_database" >> "$editable_file"
+    echo "MYSQL_USER=$mysql_user" >> "$editable_file"
+    echo "MYSQL_PASSWORD=$mysql_password" >> "$editable_file"
+    echo "MYSQL_PORT=$mysql_port" >> "$editable_file"
+    echo "MYSQL_HOST=$mysql_host" >> "$editable_file"
+    echo "DB_DIALECT=$db_dialect" >> "$editable_file"
+  
+    echo "Cleared old data in $editable_file and added new key-value pairs."
+else
+    echo "File $editable_file does not exist."
+fi
+sudo chown csye6225:csye6225 /home/admin/WebApp
+
+sudo chmod 750 /home/admin/WebApp
+
+sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+-a fetch-config \
+-m ec2 \
+-c file:/opt/aws/amazon-cloudwatch-agent/bin/cloud-watch-agent.json \
+-s
+`
+
 const instanceProfile = new aws.iam.InstanceProfile(
   "instanceProfileName", {
   role: cloudWatchAgentRole.name,
-  dependsOn: [rolePolicyAttachment],
-});
-const loadBalancer = new aws.lb.LoadBalancer("webAppLoadBalancer", {
-  internal:false,
-  loadBalancerType:"application",
-  securityGroups: [loadBalancerSecurityGroup.id],
-  subnets: publicSubnets,
-});
-
-const userdat = pulumi.interpolate`
-                  #!/bin/bash
-                  cd /home/admin/WebApp
-                  chmod +w .env
-                  editable_file=".env"  
-                  mysql_database=${rdsInstance.dbName}
-                  mysql_user=${rdsInstance.username}
-                  mysql_password=${rdsInstance.password}
-                  mysql_port=${rdsInstance.port}
-                  mysql_host=${rdsInstance.address}
-                  db_dialect=${rdsInstance.engine}
-                    
-                  if [ -f "$editable_file" ]; then
-                        
-                  > "$editable_file"
-                    
-                      # Add new key-value pairs
-                      echo "MYSQL_DATABASE=$mysql_database" >> "$editable_file"
-                      echo "MYSQL_USER=$mysql_user" >> "$editable_file"
-                      echo "MYSQL_PASSWORD=$mysql_password" >> "$editable_file"
-                      echo "MYSQL_PORT=$mysql_port" >> "$editable_file"
-                      echo "MYSQL_HOST=$mysql_host" >> "$editable_file"
-                      echo "DB_DIALECT=$db_dialect" >> "$editable_file"
-                    
-                      echo "Cleared old data in $editable_file and added new key-value pairs."
-                  else
-                      echo "File $editable_file does not exist."
-                  fi
-                  sudo chown csye6225:csye6225 /home/admin/WebApp
-
-                  sudo chmod 750 /home/admin/WebApp
-
-                  sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
-                  -a fetch-config \
-                  -m ec2 \
-                  -c file:/opt/aws/amazon-cloudwatch-agent/bin/cloud-watch-agent.json \
-                  -s`
-//const Base64userdata = userdat.apply(script=>Buffer.from(script).toString("base64"))
+},{dependsOn:[rolePolicyAttachment]});
 
 const launchTemplate = new aws.ec2.LaunchTemplate("webAppLaunchTemplate", {
-  imageId:"ami-03a3253e23c6da75c",
-  // aws.ec2.getAmi({
-  //   owners: [owner],
-  //   mostRecent: true,
-  //  filters: [{ name: "state", values: ["available"] }],
-  //  }).then((ami) => ami.id),
+  imageId:"ami-0de70f48dfd850516",
   instanceType: "t2.micro",
-  dependsOn:rdsInstance,
-  keyName: "ec2dev",
-  userData: userdat.apply(script=>Buffer.from(script).toString("base64")),
+  keyName: "ec2demo",
   iamInstanceProfile: {
-      name: instanceProfile,
+      name: instanceProfile.name,
   },
-  associatePublicIpAddress : true,
+  tagSpecifications: [{
+    resourceType: "instance",
+    tags: {
+        Name: "Ec2Instance",
+    },
+}],
   networkInterfaces : [
     {
       securityGroups : [securityGroup.id],
-    },
-  ],
+      associatePublicIpAddress: "true",
+      deleteOnTermination: true
+    }],
+  userData: userdat.apply(script=>Buffer.from(script).toString("base64")),
 },{dependsOn:[instanceProfile,rdsInstance]});
 
 const targetGroup = new aws.lb.TargetGroup("webAppTargetGroup", {
@@ -336,44 +323,50 @@ const targetGroup = new aws.lb.TargetGroup("webAppTargetGroup", {
   vpcId: vpc.id,
   associatePublicIpAddress:true,
   healthCheck: {
-      path: "/healthz", // Adjust the health check path based on your application
+      path: "/healthz", 
       port: 3001,
       protocol:"HTTP",
       timeout:10,
-      unhealthyThreshold:2,
-      healthyThreshold:2,
+      interval: 30,
+      unhealthyThreshold:3,
+      healthyThreshold:3,
   },
-});
+},{dependsOn:launchTemplate});
+
+const loadBalancer = new aws.lb.LoadBalancer("webAppLoadBalancer", {
+  internal:false,
+  loadBalancerType:"application",
+  securityGroups: [loadBalancerSecurityGroup.id],
+  subnets: publicSubnets,
+  enableDeletionProtection: false,
+},{dependsOn:targetGroup,rdsInstance});
+
 const listener = new aws.lb.Listener("webAppListener", {
   loadBalancerArn: loadBalancer.arn,
   port: 80,
+  protocol:"HTTP",
   defaultActions: [
       {
           type: "forward",
           targetGroupArn: targetGroup.arn,
       },
   ],
-},{dependsOn: loadBalancer});
-// Create an autoscaling group with tags
+},{dependsOn: loadBalancer,targetGroup});
+
 const autoScalingGroup = new aws.autoscaling.Group("webAppAutoScalingGroup", {
   vpc:vpc.id,
-  vpcZoneIdentifiers: publicSubnets,
+  vpcZoneIdentifiers: publicSubnets.map(subnet => subnet.id),
+  healthCheckType:"EC2",
+  healthCheckGracePeriod: 300,
   launchTemplate:{
     id:launchTemplate.id,
     version:"$Latest",
   },
+  forceDelete: true,
   minSize: 1,
   maxSize: 3,
   desiredCapacity: 1,
-  cooldown: 60,
-  tags: [
-      {
-          key: "AutoScalingGroup",
-          value: "WebAppASG",
-          propagateAtLaunch: true,
-      },
-  ],
-  targetGroupArns:[targetGroup.arn]
+  targetGroupArns:[targetGroup.arn],
 },{dependsOn:[listener]});
 
 const scaleUpPolicy = new aws.autoscaling.Policy("scaleUpPolicy", {
@@ -382,10 +375,23 @@ const scaleUpPolicy = new aws.autoscaling.Policy("scaleUpPolicy", {
   cooldown: 60,
   autoscalingGroupName: autoScalingGroup.name,
   name: "scaleUpPolicy",
-  evaluationPeriods: 1,
   metricAggregationType: "Average",
-  scalingTargetId:autoScalingGroup.id,
-});
+},{dependsOn:autoScalingGroup});
+
+const scalingUpcloudWatchMetricAlarm = new aws.cloudwatch.MetricAlarm("scalingUpcloudWatchMetricAlarm", {
+  comparisonOperator: "GreaterThanOrEqualToThreshold",
+  evaluationPeriods: 1,
+  metricName: "CPUUtilization",
+  namespace: "AWS/EC2",
+  period: 60,
+  statistic: "Average",
+  threshold: 5,
+  dimensions: {
+      AutoScalingGroupName: autoScalingGroup.name,
+  },
+  alarmDescription: "ec2 cpu utilization",
+  alarmActions: [scaleUpPolicy.arn],
+},{dependsOn:scaleUpPolicy});
 
 const scaleDownPolicy = new aws.autoscaling.Policy("scaleDownPolicy", {
   scalingAdjustment: -1,
@@ -394,18 +400,88 @@ const scaleDownPolicy = new aws.autoscaling.Policy("scaleDownPolicy", {
   autoscalingGroupName: autoScalingGroup.name,
   name: "scaleDownPolicy",
   metricAggregationType: "Average",
-  scalingTargetId:autoScalingGroup.id,
-});
+},{dependsOn:autoScalingGroup});
 
-// Create a listener for HTTP traffic
+const scalingDowncloudWatchMetricAlarm = new aws.cloudwatch.MetricAlarm("scalingDowncloudWatchMetricAlarm", {
+  comparisonOperator: "LessThanOrEqualToThreshold",
+  evaluationPeriods: 1,
+  metricName: "CPUUtilization",
+  namespace: "AWS/EC2",
+  period: 60,
+  statistic: "Average",
+  threshold: 3,
+  dimensions: {
+      AutoScalingGroupName: autoScalingGroup.name,
+  },
+  alarmDescription: "ec2 cpu utilization",
+  alarmActions: [scaleDownPolicy.arn],
+},{dependsOn:scaleDownPolicy});
+    // const ec2Inst = new aws.ec2.Instance(instanceName, {
+    //   ami:"ami-03a3253e23c6da75c",
+    //   // aws.ec2.getAmi({
+    //   //   owners: [owner],
+    //   //   mostRecent: true,
+    //   //   filters: [{ name: "state", values: ["available"] }],
+    //   // }).then((ami) => ami.id),
+    //   dependsOn:rdsInstance,
+    //   iamInstanceProfile: instanceProfile.name,
+    //   userData:pulumi.interpolate `
+    //   #!/bin/bash
+    //   cd /home/admin/WebApp
+    //   chmod +w .env
+    //   editable_file=".env"  
+    //   mysql_database=${rdsInstance.dbName}
+    //   mysql_user=${rdsInstance.username}
+    //   mysql_password=${rdsInstance.password}
+    //   mysql_port=${rdsInstance.port}
+    //   mysql_host=${rdsInstance.address}
+    //   db_dialect=${rdsInstance.engine}
+        
+    //   if [ -f "$editable_file" ]; then
+            
+    //   > "$editable_file"
+        
+    //       # Add new key-value pairs
+    //       echo "MYSQL_DATABASE=$mysql_database" >> "$editable_file"
+    //       echo "MYSQL_USER=$mysql_user" >> "$editable_file"
+    //       echo "MYSQL_PASSWORD=$mysql_password" >> "$editable_file"
+    //       echo "MYSQL_PORT=$mysql_port" >> "$editable_file"
+    //       echo "MYSQL_HOST=$mysql_host" >> "$editable_file"
+    //       echo "DB_DIALECT=$db_dialect" >> "$editable_file"
+        
+    //       echo "Cleared old data in $editable_file and added new key-value pairs."
+    //   else
+    //       echo "File $editable_file does not exist."
+    //   fi
+    //   sudo chown csye6225:csye6225 /home/admin/WebApp
 
-    const domain = "dev.sheetalpujari.me"
+    //   sudo chmod 750 /home/admin/WebApp
+
+    //   sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+    //   -a fetch-config \
+    //   -m ec2 \
+    //   -c file:/opt/aws/amazon-cloudwatch-agent/bin/cloudwatch-config.json \
+    //   -s
+
+    //   `.apply((s)=>s.trim()),
+    //   instanceType: "t2.micro",
+    //   vpcSecurityGroupIds: [securityGroup.id],
+    //   associatePublicIpAddress: true,
+    //   subnetId: publicSubnets[0].id,
+    //   keyName: "ec2demo",
+    //   tags: { Name: instanceName },
+    //   rootBlockDevice: {
+    //     volumeSize: 25,
+    //     volumeType: "gp2",
+    //     deleteOnTermination: true,
+    //   },
+    // });
+    const domain = "demo.sheetalpujari.me"
     const hostedZone = aws.route53.getZone({
       name:domain,
     });
     hostedZone.then(zone => {
     const port = 3001;
-
     const aRecord = new aws.route53.Record('csye-6225', {
     name: domain,
     zoneId: zone.id,
@@ -418,87 +494,6 @@ const scaleDownPolicy = new aws.autoscaling.Policy("scaleDownPolicy", {
       },
     ]
   });
-
-
 },
-{dependsOn:[loadBalancer]});
+{dependsOn:[autoScalingGroup]});
 });
-
-
-              // const ec2Inst = new aws.ec2.Instance(instanceName, {
-              //   ami:"ami-0861b8c1d1f16965a",
-              //   // aws.ec2.getAmi({
-              //   //   owners: [owner],
-              //   //   mostRecent: true,
-              //   //   filters: [{ name: "state", values: ["available"] }],
-              //   // }).then((ami) => ami.id),
-              //   dependsOn:rdsInstance,
-              //   iamInstanceProfile: instanceProfile.name,
-              //   userData:pulumi.interpolate `
-              //   #!/bin/bash
-              //   cd /home/admin/WebApp
-              //   chmod +w .env
-              //   editable_file=".env"  
-              //   mysql_database=${rdsInstance.dbName}
-              //   mysql_user=${rdsInstance.username}
-              //   mysql_password=${rdsInstance.password}
-              //   mysql_port=${rdsInstance.port}
-              //   mysql_host=${rdsInstance.address}
-              //   db_dialect=${rdsInstance.engine}
-                  
-              //   if [ -f "$editable_file" ]; then
-                      
-              //   > "$editable_file"
-                  
-              //       # Add new key-value pairs
-              //       echo "MYSQL_DATABASE=$mysql_database" >> "$editable_file"
-              //       echo "MYSQL_USER=$mysql_user" >> "$editable_file"
-              //       echo "MYSQL_PASSWORD=$mysql_password" >> "$editable_file"
-              //       echo "MYSQL_PORT=$mysql_port" >> "$editable_file"
-              //       echo "MYSQL_HOST=$mysql_host" >> "$editable_file"
-              //       echo "DB_DIALECT=$db_dialect" >> "$editable_file"
-                  
-              //       echo "Cleared old data in $editable_file and added new key-value pairs."
-              //   else
-              //       echo "File $editable_file does not exist."
-              //   fi
-              //   sudo chown csye6225:csye6225 /home/admin/WebApp
-            
-              //   sudo chmod 750 /home/admin/WebApp
-
-              //   sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
-              //   -a fetch-config \
-              //   -m ec2 \
-              //   -c file:/opt/aws/amazon-cloudwatch-agent/bin/cloudwatch-config.json \
-              //   -s
-
-              //   `.apply((s)=>s.trim()),
-              //   instanceType: "t2.micro",
-              //   vpcSecurityGroupIds: [securityGroup.id],
-              //   associatePublicIpAddress: true,
-              //   subnetId: publicSubnets[0].id,
-              //   keyName: "ec2dev",
-              //   tags: { Name: instanceName },
-              //   rootBlockDevice: {
-              //     volumeSize: 25,
-              //     volumeType: "gp2",
-              //     deleteOnTermination: true,
-              //   },
-              // });
-  //for A record creation
-  //const baseDomainName = config.require("basedomain"); 
-//     const zonePromise = aws.route53.getZone({ name: baseDomainName }, { async: true });
-
-//     zonePromise.then(zone => {
-
-//     const record = new aws.route53.Record("myRecord", {
-//         zoneId: zone.zoneId, 
-//         name: "",
-//         type: "A",
-//         ttl: 60,
-//         records: [ec2Inst.publicIp], 
-//     },
-//     { dependsOn: [ec2Inst]});
-
-    
-// });
