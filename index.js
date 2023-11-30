@@ -1,5 +1,8 @@
 const pulumi = require("@pulumi/pulumi");
 const aws = require("@pulumi/aws");
+const gcp = require("@pulumi/gcp")
+const AWS = require('aws-sdk');
+const lambda = new AWS.Lambda();
 const config = new pulumi.Config();
 const azCount = config.getNumber("azCount");
 const vpcCidr = config.require("vpcCidr");
@@ -21,6 +24,8 @@ const pubRt = config.require("pubRt");
 const privRt = config.require("privRt");
 const pubRoute = config.require("pubRoute");
 const owner = config.require("owner");
+
+
 
 function getFirstNAz(data, n) {
   const azCount = data.names.length;
@@ -247,9 +252,14 @@ aws.getAvailabilityZones({ state: state }).then((data) => {
 const rolePolicyAttachment = new aws.iam.RolePolicyAttachment("cloudwatchAgentPolicyAttachment", {
   policyArn: "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy",
   role: cloudWatchAgentRole.name,
-
 },{ dependsOn: [cloudWatchAgentRole] });
 
+const snsTopic = new aws.sns.Topic("mySnsTopic");
+const bucket = new gcp.storage.Bucket("bujk", {
+  name:"bujk",
+  location: "US",
+  ForceDelete: true
+});
 const userdat = pulumi.interpolate
 `#!/bin/bash
 cd /home/admin/WebApp
@@ -261,11 +271,11 @@ mysql_password=${rdsInstance.password}
 mysql_port=${rdsInstance.port}
 mysql_host=${rdsInstance.address}
 db_dialect=${rdsInstance.engine}
-  
+topicArn = ${snsTopic.arn}
+bucketname = ${bucket.name}
 if [ -f "$editable_file" ]; then
       
 > "$editable_file"
-  
     # Add new key-value pairs
     echo "MYSQL_DATABASE=$mysql_database" >> "$editable_file"
     echo "MYSQL_USER=$mysql_user" >> "$editable_file"
@@ -273,7 +283,9 @@ if [ -f "$editable_file" ]; then
     echo "MYSQL_PORT=$mysql_port" >> "$editable_file"
     echo "MYSQL_HOST=$mysql_host" >> "$editable_file"
     echo "DB_DIALECT=$db_dialect" >> "$editable_file"
-  
+    echo "TopicArn=$topicArn" >> "$editable_file"
+    echo "Bucketname=$bucketname" >> "$editable_file"
+    
     echo "Cleared old data in $editable_file and added new key-value pairs."
 else
     echo "File $editable_file does not exist."
@@ -288,16 +300,15 @@ sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
 -c file:/opt/aws/amazon-cloudwatch-agent/bin/cloud-watch-agent.json \
 -s
 `
-
 const instanceProfile = new aws.iam.InstanceProfile(
   "instanceProfileName", {
   role: cloudWatchAgentRole.name,
 },{dependsOn:[rolePolicyAttachment]});
 
 const launchTemplate = new aws.ec2.LaunchTemplate("webAppLaunchTemplate", {
-  imageId:"ami-0de70f48dfd850516",
+  imageId:"ami-0297699f997f25087",
   instanceType: "t2.micro",
-  keyName: "ec2demo",
+  keyName: "ec2dev",
   iamInstanceProfile: {
       name: instanceProfile.name,
   },
@@ -310,7 +321,6 @@ const launchTemplate = new aws.ec2.LaunchTemplate("webAppLaunchTemplate", {
   networkInterfaces : [
     {
       securityGroups : [securityGroup.id],
-      associatePublicIpAddress: "true",
       deleteOnTermination: true
     }],
   userData: userdat.apply(script=>Buffer.from(script).toString("base64")),
@@ -416,8 +426,161 @@ const scalingDowncloudWatchMetricAlarm = new aws.cloudwatch.MetricAlarm("scaling
   alarmDescription: "ec2 cpu utilization",
   alarmActions: [scaleDownPolicy.arn],
 },{dependsOn:scaleDownPolicy});
+
+const lambdaRole = new aws.iam.Role("lambdaRole", {
+  assumeRolePolicy: JSON.stringify({
+    Version: "2012-10-17",
+    Statement: [{
+        Action: "sts:AssumeRole",
+        Effect: "Allow",
+        Sid: "AssumeRolePolicy", 
+        Principal: {
+            Service: "lambda.amazonaws.com",
+        },
+    }],
+})
+});
+
+const serviceAccount = new gcp.serviceaccount.Account("myServiceAccount", {
+  accountId: "developer-406202",
+  displayName: "My Service Account"
+});
+const serviceAccountKey = new gcp.serviceaccount.Key("myServiceAccountKey", {
+  serviceAccountId: serviceAccount.accountId,
+});
+
+
+const lambdaPolicy = new aws.iam.Policy("lambdaPolicy", {
+  policy: {
+  "Version": "2012-10-17",
+  "Statement": [
+      {
+          "Effect": "Allow",
+          "Action": [
+              "logs:CreateLogGroup",
+              "logs:CreateLogStream",
+              "logs:PutLogEvents",
+              "lambda:InvokeFunction",
+          ],
+          "Resource": "*"
+      }
+  ]
+  },
+});
+const SnsTopicPolicy = new aws.iam.Policy("SNSPolicy", {
+  policy: {
+  "Version": "2012-10-17",
+  "Statement": [
+      {
+          "Effect": "Allow",
+          "Action": [
+               "sns:Publish",
+          ],
+          "Resource": "*"
+      }
+  ]
+  },
+});
+const dynamotable = new aws.dynamodb.Table("myTable",{
+  attributes: [
+      {
+          name: "emailId",
+          type: "S",
+      },
+      {
+          name: "status",
+          type: "S",
+      },
+      {
+          name: "timestamp",
+          type: "S",
+      }
+  ],
+  hashKey: "emailId",
+  billingMode: "PAY_PER_REQUEST",
+  globalSecondaryIndexes: [
+      {
+          name: "status",
+          hashKey: "status",
+          projectionType: "ALL",
+          readCapacity: 1,
+          writeCapacity: 1,
+      },
+      {
+          name: "timestamp",
+          hashKey: "timestamp",
+          projectionType: "ALL",
+          readCapacity: 1,
+          writeCapacity: 1,
+      }
+  ],
+  })
+
+const dynamodbPolicy = new aws.iam.Policy("dynamodbPolicy", {
+  policy: {
+      "Version": "2012-10-17",
+      "Statement": [
+          {
+              "Effect": "Allow",
+              "Action": [
+                  "dynamodb:GetItem",
+                  "dynamodb:PutItem",
+                  "dynamodb:UpdateItem",
+                  "dynamodb:BatchWriteItem",
+                  "dynamodb:Query",
+                  "dynamodb:Scan",
+                  "dynamodb:DeleteItem"
+              ],
+              "Resource": "*"
+          }
+      ]
+  },
+});
+const lambdaRolePolicyAttachment = new aws.iam.RolePolicyAttachment("lambdaRolePolicyAttachment", {
+  policyArn: lambdaPolicy.arn,
+  role: lambdaRole.name,
+});
+const attachSNS = new aws.iam.RolePolicyAttachment("SNSPolicyAttachment", {
+  role: lambdaRole.name,
+  policyArn: SnsTopicPolicy.arn,
+},{ dependsOn: [lambdaRole] });
+
+const attachDynamoDbPolicy = new aws.iam.RolePolicyAttachment("dynamodbPolicyAttachment", {
+  policyArn: dynamodbPolicy.arn,
+  role: lambdaRole.name,
+});
+const domain = "dev.sheetalpujari.me"
+const lambdaFunction = new aws.lambda.Function("myLambdaFunction", {
+  handler: "serverless/index.handler", 
+  runtime: "nodejs14.x",
+  code: new pulumi.asset.FileArchive("/Users/sheetalpujari/serverless/serverless.zip"),
+  packageType: "Zip",
+  environment: {
+      variables: {
+          GCP_SERVICE_ACCOUNT_KEY: serviceAccountKey.privateKeyData,
+          BUCKET_NAME: bucket.name, 
+          DOMAIN:domain, 
+          AWS_DYNAMODB_TABLE:dynamotable.name,
+      
+      },
+  },
+  role: lambdaRole.arn,
+},{ dependsOn: [serviceAccountKey] });
+
+
+const lambdaSubscription = new aws.sns.TopicSubscription("lambdaSubscription", {
+  protocol: "lambda",
+  endpoint: lambdaFunction.arn,
+  topic: snsTopic.arn,
+});
+const permission = new aws.lambda.Permission("myPermission", {
+  action: "lambda:InvokeFunction",
+  function: lambdaFunction.id,
+  principal: "sns.amazonaws.com",
+  sourceArn: snsTopic.arn
+});
     // const ec2Inst = new aws.ec2.Instance(instanceName, {
-    //   ami:"ami-03a3253e23c6da75c",
+    //   ami:"ami-0c40cbdc2a509a7ee",
     //   // aws.ec2.getAmi({
     //   //   owners: [owner],
     //   //   mostRecent: true,
@@ -436,7 +599,8 @@ const scalingDowncloudWatchMetricAlarm = new aws.cloudwatch.MetricAlarm("scaling
     //   mysql_port=${rdsInstance.port}
     //   mysql_host=${rdsInstance.address}
     //   db_dialect=${rdsInstance.engine}
-        
+    //   topicArn = ${snsTopic.arn}
+    //   bucketname = ${bucket.name}
     //   if [ -f "$editable_file" ]; then
             
     //   > "$editable_file"
@@ -448,7 +612,8 @@ const scalingDowncloudWatchMetricAlarm = new aws.cloudwatch.MetricAlarm("scaling
     //       echo "MYSQL_PORT=$mysql_port" >> "$editable_file"
     //       echo "MYSQL_HOST=$mysql_host" >> "$editable_file"
     //       echo "DB_DIALECT=$db_dialect" >> "$editable_file"
-        
+    //       echo "TopicArn=$topicArn" >> "$editable_file"
+    //       echo "Bucketname"=$bucketname" >> "$editable_file"
     //       echo "Cleared old data in $editable_file and added new key-value pairs."
     //   else
     //       echo "File $editable_file does not exist."
@@ -462,13 +627,19 @@ const scalingDowncloudWatchMetricAlarm = new aws.cloudwatch.MetricAlarm("scaling
     //   -m ec2 \
     //   -c file:/opt/aws/amazon-cloudwatch-agent/bin/cloudwatch-config.json \
     //   -s
+    //   # Install Google Cloud SDK (gcloud)
+    //   curl -O https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-sdk-VERSION-linux-x86_64.tar.gz
+    //   tar -zxvf google-cloud-sdk-VERSION-linux-x86_64.tar.gz
+    //   ./google-cloud-sdk/install.sh
 
+    //   gcloud auth activate-service-account --key-file=<(echo '${serviceAccountKey.privateKey}')  
+    //   gsutil ls gs://gcp-bucket
     //   `.apply((s)=>s.trim()),
     //   instanceType: "t2.micro",
     //   vpcSecurityGroupIds: [securityGroup.id],
     //   associatePublicIpAddress: true,
     //   subnetId: publicSubnets[0].id,
-    //   keyName: "ec2demo",
+    //   keyName: "ec2dev",
     //   tags: { Name: instanceName },
     //   rootBlockDevice: {
     //     volumeSize: 25,
@@ -476,7 +647,7 @@ const scalingDowncloudWatchMetricAlarm = new aws.cloudwatch.MetricAlarm("scaling
     //     deleteOnTermination: true,
     //   },
     // });
-    const domain = "demo.sheetalpujari.me"
+    
     const hostedZone = aws.route53.getZone({
       name:domain,
     });
@@ -492,8 +663,9 @@ const scalingDowncloudWatchMetricAlarm = new aws.cloudwatch.MetricAlarm("scaling
         zoneId: loadBalancer.zoneId,
         evaluateTargetHealth: true,
       },
-    ]
-  });
-},
-{dependsOn:[autoScalingGroup]});
+     ]
+       });
+    },
+    {dependsOn:[autoScalingGroup]});
+
 });
