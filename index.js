@@ -304,10 +304,18 @@ const instanceProfile = new aws.iam.InstanceProfile(
   "instanceProfileName", {
   role: cloudWatchAgentRole.name,
 },{dependsOn:[rolePolicyAttachment]});
+// const amiID = aws.ec2.getAmi({
+//   owners: [owner],
+//   mostRecent: true,
+//   filters: [{ name: "state", values: ["available"] }],
+// }).then((ami) => ami.id)
 
 const launchTemplate = new aws.ec2.LaunchTemplate("webAppLaunchTemplate", {
-  imageId:"ami-0297699f997f25087",
+  imageId:"ami-0c075751a0946a37e",
   instanceType: "t2.micro",
+  // LaunchTemplateData: {
+  //     InstanceType: "t2.micro", 
+  // },
   keyName: "ec2dev",
   iamInstanceProfile: {
       name: instanceProfile.name,
@@ -342,6 +350,7 @@ const targetGroup = new aws.lb.TargetGroup("webAppTargetGroup", {
       healthyThreshold:3,
   },
 },{dependsOn:launchTemplate});
+const sslCertificateArn = "arn:aws:acm:us-east-1:413925622897:certificate/40efd052-e507-4cbf-9f24-5f70ab7bc823";
 
 const loadBalancer = new aws.lb.LoadBalancer("webAppLoadBalancer", {
   internal:false,
@@ -353,8 +362,13 @@ const loadBalancer = new aws.lb.LoadBalancer("webAppLoadBalancer", {
 
 const listener = new aws.lb.Listener("webAppListener", {
   loadBalancerArn: loadBalancer.arn,
-  port: 80,
-  protocol:"HTTP",
+  port: 443,
+  protocol: "HTTPS",
+  sslPolicy: "ELBSecurityPolicy-2016-08",
+  certificateArn: sslCertificateArn,
+  certificates: [{
+    certificateArn: sslCertificateArn, 
+  }],
   defaultActions: [
       {
           type: "forward",
